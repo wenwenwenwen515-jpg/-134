@@ -32,41 +32,33 @@ jobs:
           set -e
           ZIP_FILE=$(find . -maxdepth 1 -type f -iname "*.zip" | head -n 1)
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: No ZIP file found in repository root."
+            echo "ERROR: No ZIP file found."
             exit 1
           fi
-
           mkdir -p source
           unzip -oq "$ZIP_FILE" -d source
-
           GRADLEW=$(find source -type f -name gradlew | head -n 1)
           if [ -z "$GRADLEW" ]; then
-            echo "ERROR: gradlew not found inside ZIP."
+            echo "ERROR: gradlew not found."
             exit 1
           fi
-
           PROJECT_DIR=$(dirname "$GRADLEW")
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
           echo "Project directory: $PROJECT_DIR"
 
-      - name: Upgrade Gradle wrapper to 7.6
+      - name: Upgrade Gradle wrapper
         shell: bash
         run: |
           set -e
-          WRAPPER_FILE="$PROJECT_DIR/gradle/wrapper/gradle-wrapper.properties"
-
-          if [ ! -f "$WRAPPER_FILE" ]; then
-            echo "ERROR: gradle-wrapper.properties not found."
+          FILE="$PROJECT_DIR/gradle/wrapper/gradle-wrapper.properties"
+          if [ ! -f "$FILE" ]; then
+            echo "ERROR: Gradle wrapper properties not found."
             exit 1
           fi
+          sed -i -E 's#gradle-[^/]+-(bin|all)\.zip#gradle-7.6-bin.zip#' "$FILE"
+          sed -i '/^distributionSha256Sum=/d' "$FILE"
 
-          sed -i -E 's#gradle-[^/]+-(bin|all)\.zip#gradle-7.6-bin.zip#' "$WRAPPER_FILE"
-          sed -i '/^distributionSha256Sum=/d' "$WRAPPER_FILE"
-
-          echo "Updated Gradle wrapper:"
-          cat "$WRAPPER_FILE"
-
-      - name: Add Maven Central repository
+      - name: Add Maven Central to project repositories
         shell: bash
         run: |
           set -e
@@ -76,66 +68,51 @@ jobs:
           from pathlib import Path
           import re
 
-          p = Path("build.gradle")
-          if not p.exists():
-              raise SystemExit("ERROR: Root build.gradle not found.")
+          def add_to_repositories(path):
+              p = Path(path)
+              if not p.exists():
+                  return
 
-          s = p.read_text()
-          m = re.search(r'\bbuildscript\s*\{', s)
+              s = p.read_text()
+              original = s
 
-          if not m:
-              print("No buildscript block found; skipping this patch.")
-          else:
-              start = s.find("{", m.start())
-              depth = 0
-              end = None
+              # Add Maven Central to all simple Groovy repositories blocks.
+              pattern = r'\brepositories\s*\{'
 
-              for i in range(start, len(s)):
-                  if s[i] == "{":
-                      depth += 1
-                  elif s[i] == "}":
-                      depth -= 1
-                      if depth == 0:
-                          end = i
-                          break
+              matches = list(re.finditer(pattern, s))
+              offset = 0
 
-              if end is None:
-                  raise SystemExit("ERROR: Invalid build.gradle structure.")
-
-              block = s[start:end + 1]
-              r = re.search(r'\brepositories\s*\{', block)
-
-              if not r:
-                  print("No buildscript repositories block found; skipping this patch.")
-              else:
-                  repo_open = start + r.end() - 1
+              for match in matches:
+                  pos = match.end() - 1 + offset
                   depth = 0
-                  repo_end = None
+                  end = None
 
-                  for i in range(repo_open, end + 1):
-                      if s[i] == "{":
+                  for i in range(pos, len(s)):
+                      if s[i] == '{':
                           depth += 1
-                      elif s[i] == "}":
+                      elif s[i] == '}':
                           depth -= 1
                           if depth == 0:
-                              repo_end = i
+                              end = i
                               break
 
-                  if repo_end is None:
-                      raise SystemExit("ERROR: Invalid repositories block.")
+                  if end is None:
+                      continue
 
-                  repo_block = s[repo_open:repo_end + 1]
+                  block = s[pos:end + 1]
+                  if not re.search(r'\bmavenCentral\s*\(', block):
+                      addition = '\n        mavenCentral()\n'
+                      s = s[:pos + 1] + addition + s[pos + 1:]
+                      offset += len(addition)
 
-                  if not re.search(r'\bmavenCentral\s*\(', repo_block):
-                      s = (
-                          s[:repo_open + 1]
-                          + "\n        mavenCentral()\n"
-                          + s[repo_open + 1:]
-                      )
-                      p.write_text(s)
-                      print("Added Maven Central.")
-                  else:
-                      print("Maven Central already exists.")
+              if s != original:
+                  p.write_text(s)
+                  print(f"Updated {path}")
+              else:
+                  print(f"No changes needed in {path}")
+
+          for name in ("build.gradle", "app/build.gradle"):
+              add_to_repositories(name)
           PY
 
       - name: Build APK
@@ -152,17 +129,13 @@ jobs:
         run: |
           set -e
           mkdir -p output
-
           APK=$(find "$PROJECT_DIR/app/build/outputs/apk" \
             -type f -name "*.apk" | head -n 1)
-
           if [ -z "$APK" ]; then
             echo "ERROR: APK file was not generated."
             exit 1
           fi
-
           cp "$APK" output/SmsForwarder-V56.2.apk
-          echo "APK collected successfully."
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
