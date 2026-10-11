@@ -24,7 +24,7 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: "7.5.1"
+          gradle-version: "7.6"
 
       - name: Extract source ZIP
         shell: bash
@@ -35,22 +35,43 @@ jobs:
             echo "ERROR: No ZIP file found in repository root."
             exit 1
           fi
+
           mkdir -p source
           unzip -oq "$ZIP_FILE" -d source
+
           GRADLEW=$(find source -type f -name gradlew | head -n 1)
           if [ -z "$GRADLEW" ]; then
             echo "ERROR: gradlew not found inside ZIP."
             exit 1
           fi
+
           PROJECT_DIR=$(dirname "$GRADLEW")
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
           echo "Project directory: $PROJECT_DIR"
+
+      - name: Upgrade Gradle wrapper to 7.6
+        shell: bash
+        run: |
+          set -e
+          WRAPPER_FILE="$PROJECT_DIR/gradle/wrapper/gradle-wrapper.properties"
+
+          if [ ! -f "$WRAPPER_FILE" ]; then
+            echo "ERROR: gradle-wrapper.properties not found."
+            exit 1
+          fi
+
+          sed -i -E 's#gradle-[^/]+-(bin|all)\.zip#gradle-7.6-bin.zip#' "$WRAPPER_FILE"
+          sed -i '/^distributionSha256Sum=/d' "$WRAPPER_FILE"
+
+          echo "Updated Gradle wrapper:"
+          cat "$WRAPPER_FILE"
 
       - name: Add Maven Central repository
         shell: bash
         run: |
           set -e
           cd "$PROJECT_DIR"
+
           python3 - <<'PY'
           from pathlib import Path
           import re
@@ -60,52 +81,61 @@ jobs:
               raise SystemExit("ERROR: Root build.gradle not found.")
 
           s = p.read_text()
-          m = re.search(r'buildscript\s*\{', s)
+          m = re.search(r'\bbuildscript\s*\{', s)
+
           if not m:
-              raise SystemExit("ERROR: buildscript block not found.")
-
-          start = s.find("{", m.start())
-          depth = 0
-          end = None
-          for i in range(start, len(s)):
-              if s[i] == "{":
-                  depth += 1
-              elif s[i] == "}":
-                  depth -= 1
-                  if depth == 0:
-                      end = i
-                      break
-
-          if end is None:
-              raise SystemExit("ERROR: Invalid build.gradle structure.")
-
-          block = s[start:end + 1]
-          r = re.search(r'repositories\s*\{', block)
-          if not r:
-              raise SystemExit("ERROR: buildscript repositories block not found.")
-
-          repo_open = start + r.end() - 1
-          depth = 0
-          repo_end = None
-          for i in range(repo_open, end + 1):
-              if s[i] == "{":
-                  depth += 1
-              elif s[i] == "}":
-                  depth -= 1
-                  if depth == 0:
-                      repo_end = i
-                      break
-
-          if repo_end is None:
-              raise SystemExit("ERROR: Invalid repositories block.")
-
-          repo_block = s[repo_open:repo_end + 1]
-          if not re.search(r'\bmavenCentral\s*\(', repo_block):
-              s = s[:repo_open + 1] + "\n        mavenCentral()\n" + s[repo_open + 1:]
-              p.write_text(s)
-              print("Added mavenCentral() to buildscript repositories.")
+              print("No buildscript block found; skipping this patch.")
           else:
-              print("Maven Central is already configured.")
+              start = s.find("{", m.start())
+              depth = 0
+              end = None
+
+              for i in range(start, len(s)):
+                  if s[i] == "{":
+                      depth += 1
+                  elif s[i] == "}":
+                      depth -= 1
+                      if depth == 0:
+                          end = i
+                          break
+
+              if end is None:
+                  raise SystemExit("ERROR: Invalid build.gradle structure.")
+
+              block = s[start:end + 1]
+              r = re.search(r'\brepositories\s*\{', block)
+
+              if not r:
+                  print("No buildscript repositories block found; skipping this patch.")
+              else:
+                  repo_open = start + r.end() - 1
+                  depth = 0
+                  repo_end = None
+
+                  for i in range(repo_open, end + 1):
+                      if s[i] == "{":
+                          depth += 1
+                      elif s[i] == "}":
+                          depth -= 1
+                          if depth == 0:
+                              repo_end = i
+                              break
+
+                  if repo_end is None:
+                      raise SystemExit("ERROR: Invalid repositories block.")
+
+                  repo_block = s[repo_open:repo_end + 1]
+
+                  if not re.search(r'\bmavenCentral\s*\(', repo_block):
+                      s = (
+                          s[:repo_open + 1]
+                          + "\n        mavenCentral()\n"
+                          + s[repo_open + 1:]
+                      )
+                      p.write_text(s)
+                      print("Added Maven Central.")
+                  else:
+                      print("Maven Central already exists.")
           PY
 
       - name: Build APK
@@ -114,6 +144,7 @@ jobs:
           set -e
           cd "$PROJECT_DIR"
           chmod +x gradlew
+          ./gradlew --version
           ./gradlew :app:assembleDebug --no-daemon --stacktrace
 
       - name: Collect APK
@@ -121,12 +152,17 @@ jobs:
         run: |
           set -e
           mkdir -p output
-          APK=$(find "$PROJECT_DIR/app/build/outputs/apk" -type f -name "*.apk" | head -n 1)
+
+          APK=$(find "$PROJECT_DIR/app/build/outputs/apk" \
+            -type f -name "*.apk" | head -n 1)
+
           if [ -z "$APK" ]; then
             echo "ERROR: APK file was not generated."
             exit 1
           fi
+
           cp "$APK" output/SmsForwarder-V56.2.apk
+          echo "APK collected successfully."
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
