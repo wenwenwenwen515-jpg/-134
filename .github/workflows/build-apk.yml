@@ -1,31 +1,25 @@
 name: Build SmsForwarder APK
-
 on:
   workflow_dispatch:
   push:
     paths:
       - "**.zip"
       - ".github/workflows/build-apk.yml"
-
 jobs:
   build:
     runs-on: ubuntu-22.04
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "11"
-
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "7.6"
-
       - name: Extract source ZIP
         shell: bash
         run: |
@@ -45,7 +39,6 @@ jobs:
           PROJECT_DIR=$(dirname "$GRADLEW")
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
           echo "Project directory: $PROJECT_DIR"
-
       - name: Upgrade Gradle wrapper
         shell: bash
         run: |
@@ -57,73 +50,67 @@ jobs:
           fi
           sed -i -E 's#gradle-[^/]+-(bin|all)\.zip#gradle-7.6-bin.zip#' "$FILE"
           sed -i '/^distributionSha256Sum=/d' "$FILE"
-
-      - name: Add Maven Central to project repositories
+      - name: Add Maven Central repository
         shell: bash
         run: |
           set -e
           cd "$PROJECT_DIR"
-
           python3 - <<'PY'
           from pathlib import Path
           import re
-
-          def add_to_repositories(path):
-              p = Path(path)
+          for name in ("build.gradle", "app/build.gradle"):
+              p = Path(name)
               if not p.exists():
-                  return
-
+                  continue
               s = p.read_text()
-              original = s
-
-              # Add Maven Central to all simple Groovy repositories blocks.
-              pattern = r'\brepositories\s*\{'
-
-              matches = list(re.finditer(pattern, s))
+              matches = list(re.finditer(r'\brepositories\s*\{', s))
               offset = 0
-
               for match in matches:
                   pos = match.end() - 1 + offset
                   depth = 0
                   end = None
-
                   for i in range(pos, len(s)):
-                      if s[i] == '{':
+                      if s[i] == "{":
                           depth += 1
-                      elif s[i] == '}':
+                      elif s[i] == "}":
                           depth -= 1
                           if depth == 0:
                               end = i
                               break
-
                   if end is None:
                       continue
-
                   block = s[pos:end + 1]
                   if not re.search(r'\bmavenCentral\s*\(', block):
-                      addition = '\n        mavenCentral()\n'
+                      addition = "\n        mavenCentral()\n"
                       s = s[:pos + 1] + addition + s[pos + 1:]
                       offset += len(addition)
-
-              if s != original:
-                  p.write_text(s)
-                  print(f"Updated {path}")
-              else:
-                  print(f"No changes needed in {path}")
-
-          for name in ("build.gradle", "app/build.gradle"):
-              add_to_repositories(name)
+              p.write_text(s)
+              print("Checked repositories in", name)
           PY
-
+      - name: Generate temporary debug keystore
+        shell: bash
+        run: |
+          set -e
+          KEYSTORE="$PROJECT_DIR/app/debug.keystore"
+          if [ ! -f "$KEYSTORE" ]; then
+            keytool -genkeypair \
+              -keystore "$KEYSTORE" \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+          echo "Debug keystore is ready."
       - name: Build APK
         shell: bash
         run: |
           set -e
           cd "$PROJECT_DIR"
           chmod +x gradlew
-          ./gradlew --version
           ./gradlew :app:assembleDebug --no-daemon --stacktrace
-
       - name: Collect APK
         shell: bash
         run: |
@@ -136,7 +123,6 @@ jobs:
             exit 1
           fi
           cp "$APK" output/SmsForwarder-V56.2.apk
-
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
