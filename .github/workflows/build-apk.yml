@@ -3,82 +3,134 @@ name: Build SmsForwarder APK
 on:
   workflow_dispatch:
   push:
-   paths:
-   - ‘**.zip’
-   - ‘.github/workflows/build-apk.yml’
+    paths:
+      - "**.zip"
+      - ".github/workflows/build-apk.yml"
 
 jobs:
- build:
-  runs-on: ubuntu-22.04
-  steps:
-  - name: Checkout repository
-    uses: actions/checkout@v4
-  - name: Set up Java
-    uses: actions/setup-java@v4
-    with:
-      distribution: temurin
-      java-version: '11'
-  - name: Set up Gradle
-    uses: gradle/actions/setup-gradle@v4
-    with:
-      gradle-version: '7.5.1'
-  - name: Extract source ZIP
-    shell: bash
-    run: |
-      set -e
-      ZIP_FILE=$(find . -maxdepth 1 -type f -iname '*.zip' | head -n 1)
-      if [ -z "$ZIP_FILE" ]; then
-        echo "ERROR: No ZIP file found in repository root."
-        exit 1
-      fi
-      mkdir source
-      unzip -q "$ZIP_FILE" -d source
-      GRADLEW=$(find source -type f -name gradlew | head -n 1)
-      if [ -z "$GRADLEW" ]; then
-        echo "ERROR: gradlew not found inside ZIP."
-        exit 1
-      fi
-      PROJECT_DIR=$(dirname "$GRADLEW")
-      echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-      echo "Project directory: $PROJECT_DIR"
-  - name: Show Gradle repository configuration
-    shell: bash
-    run: |
-      set -e
-      cd "$PROJECT_DIR"
-      echo "===== build.gradle ====="
-      if [ -f build.gradle ]; then
-        sed -n '1,180p' build.gradle
-      fi
-      echo "===== settings.gradle ====="
-      if [ -f settings.gradle ]; then
-        sed -n '1,180p' settings.gradle
-      fi
-      echo "===== settings.gradle.kts ====="
-      if [ -f settings.gradle.kts ]; then
-        sed -n '1,180p' settings.gradle.kts
-      fi
-  - name: Build APK
-    shell: bash
-    run: |
-      set -e
-      cd "$PROJECT_DIR"
-      chmod +x gradlew
-      ./gradlew :app:assembleDebug --no-daemon --stacktrace --info
-  - name: Collect APK
-    shell: bash
-    run: |
-      set -e
-      mkdir -p output
-      APK=$(find "$PROJECT_DIR/app/build/outputs/apk" -type f -name '*.apk' | head -n 1)
-      if [ -z "$APK" ]; then
-        echo "ERROR: APK file was not generated."
-        exit 1
-      fi
-      cp "$APK" output/SmsForwarder-V56.2.apk
-  - name: Upload APK
-    uses: actions/upload-artifact@v4
-    with:
-      name: SmsForwarder-V56.2-APK
-      path: output/SmsForwarder-V56.2.apk
-      if-no-files-found: error
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "11"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "7.5.1"
+
+      - name: Extract source ZIP
+        shell: bash
+        run: |
+          set -e
+          ZIP_FILE=$(find . -maxdepth 1 -type f -iname "*.zip" | head -n 1)
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: No ZIP file found in repository root."
+            exit 1
+          fi
+          mkdir -p source
+          unzip -oq "$ZIP_FILE" -d source
+          GRADLEW=$(find source -type f -name gradlew | head -n 1)
+          if [ -z "$GRADLEW" ]; then
+            echo "ERROR: gradlew not found inside ZIP."
+            exit 1
+          fi
+          PROJECT_DIR=$(dirname "$GRADLEW")
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Project directory: $PROJECT_DIR"
+
+      - name: Add Maven Central repository
+        shell: bash
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("build.gradle")
+          if not p.exists():
+              raise SystemExit("ERROR: Root build.gradle not found.")
+
+          s = p.read_text()
+          m = re.search(r'buildscript\s*\{', s)
+          if not m:
+              raise SystemExit("ERROR: buildscript block not found.")
+
+          start = s.find("{", m.start())
+          depth = 0
+          end = None
+          for i in range(start, len(s)):
+              if s[i] == "{":
+                  depth += 1
+              elif s[i] == "}":
+                  depth -= 1
+                  if depth == 0:
+                      end = i
+                      break
+
+          if end is None:
+              raise SystemExit("ERROR: Invalid build.gradle structure.")
+
+          block = s[start:end + 1]
+          r = re.search(r'repositories\s*\{', block)
+          if not r:
+              raise SystemExit("ERROR: buildscript repositories block not found.")
+
+          repo_open = start + r.end() - 1
+          depth = 0
+          repo_end = None
+          for i in range(repo_open, end + 1):
+              if s[i] == "{":
+                  depth += 1
+              elif s[i] == "}":
+                  depth -= 1
+                  if depth == 0:
+                      repo_end = i
+                      break
+
+          if repo_end is None:
+              raise SystemExit("ERROR: Invalid repositories block.")
+
+          repo_block = s[repo_open:repo_end + 1]
+          if not re.search(r'\bmavenCentral\s*\(', repo_block):
+              s = s[:repo_open + 1] + "\n        mavenCentral()\n" + s[repo_open + 1:]
+              p.write_text(s)
+              print("Added mavenCentral() to buildscript repositories.")
+          else:
+              print("Maven Central is already configured.")
+          PY
+
+      - name: Build APK
+        shell: bash
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Collect APK
+        shell: bash
+        run: |
+          set -e
+          mkdir -p output
+          APK=$(find "$PROJECT_DIR/app/build/outputs/apk" -type f -name "*.apk" | head -n 1)
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK file was not generated."
+            exit 1
+          fi
+          cp "$APK" output/SmsForwarder-V56.2.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SmsForwarder-V56.2-APK
+          path: output/SmsForwarder-V56.2.apk
+          if-no-files-found: error
